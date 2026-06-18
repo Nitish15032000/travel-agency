@@ -1,19 +1,11 @@
 import userModel from "../models/User.js";
 import jwt from "jsonwebtoken";
 import bcrypt from "bcryptjs";
-import nodemailer from "nodemailer";
+import transporter from "../config/mail.js";
+import redisClient from "../config/redis.js";
 import dotenv from "dotenv";
 dotenv.config();
 
-
-// Create transporter ONCE (outside function)
-const transporter = nodemailer.createTransport({
-   service: "gmail",
-   auth: {
-      user: process.env.EMAIL_USER,
-      pass: process.env.EMAIL_PASSWORD
-   }
-});
 
 // Send email ASYNCHRONOUSLY (non-blocking)
 async function sendWelcomeEmail(name, email) {
@@ -100,47 +92,50 @@ export const register = async (req, res) => {
       // Hash password
       const hash = await bcrypt.hash(password, 10);
 
-      const newUser = new userModel({
-         username,
-         name,
-         email,
-         password: hash,
-         role
-      });
+      // OTP Generation (For email verification)
+      const otp = Math.floor(100000 + Math.random() * 900000);
 
-      // Generate token
-      const token = jwt.sign(
-         { id: newUser._id, role: newUser.role },
-         process.env.JWT_SECRET,
-         { expiresIn: '30d' }
+      // OTP store in Redis (with expiration) for 10 minutes
+      await redisClient.set(`otp:${email}`,
+         JSON.stringify(
+            {
+               name,
+               username,
+               email,
+               password: hash,
+               role,
+               otp
+            }),
+         {
+            EX: 600 // 10 minutes
+         }
       );
 
-      // Save user
-      await newUser.save();
+      // Send email with OTP for verification
+      const mailOptions = {
+         from: process.env.EMAIL_USER,
+         to: email,
+         subject: 'Verify your email address',
+         html: `
+            <p>Hello ${name},</p>
+            <p>Thank you for registering with us. Please use the following OTP to verify your email address:</p>
+            <h2>${otp}</h2>
+            <p>This OTP is valid for 10 minutes.</p>
+         `
+      };
 
-      // Set cookie
-      res.cookie("token", token, {
-         httpOnly: true,
-         secure: process.env.NODE_ENV === 'production',
-         maxAge: 30 * 24 * 60 * 60 * 1000 // 30 days
-      });
-
-      // Send email ASYNCHRONOUSLY (don't await, don't block response)
-      sendWelcomeEmail(name, email).catch(err => {
-         console.log('Email send failed, but user registered:', err);
-      });
+      await transporter.sendMail(mailOptions);
 
       //Send response immediately (don't wait for email)
       return res.status(201).json({
-         message: 'User registered successfully',
+         message: 'OTP sent to your email for verification. Please check your inbox.',
          user: {
-            id: newUser._id,
-            username: newUser.username,
-            name: newUser.name,
-            email: newUser.email,
-            role: newUser.role
-         },
-         token
+            username: username,
+            name: name,
+            email: email,
+            role: role,
+            otp: otp // For testing purposes, you might want to send the OTP back in the response. Remove this in production.
+         }
       });
 
    } catch (error) {
@@ -149,6 +144,79 @@ export const register = async (req, res) => {
    }
 };
 
+// verify OTP
+export const verifyOtp = async (req, res) => {
+   try {
+      const { email, otp } = req.body;
+
+      // Retrieve OTP from Redis
+      const storedData = await redisClient.get(`otp:${email}`);
+
+      if (!storedData) {
+         return res.status(400).json({ message: 'Invalid or expired OTP' });
+      }
+
+      // Parse once and reuse
+      const parsedData = JSON.parse(storedData);
+      const { otp: storedOtp } = parsedData;
+
+      if (otp !== storedOtp) {
+         return res.status(400).json({ message: 'Invalid OTP' });
+      }
+
+
+      // Create user in database
+      const { name, username, password, role } = parsedData;
+      const newUser = new userModel({
+         name,
+         username,
+         email,
+         password,
+         isVerified: true,
+         role
+      });
+      await newUser.save();
+
+
+      // Login user
+      const token = jwt.sign(
+         {
+            id: newUser._id,
+            role: newUser.role
+         },
+         process.env.JWT_SECRET,
+         { expiresIn: '30d' }
+      );
+
+      res.cookie("token", token);
+
+
+      // Send email ASYNCHRONOUSLY (don't await, don't block response)
+      sendWelcomeEmail(name, email).catch(err => {
+         console.log('Email send failed, but user registered:', err);
+      });
+
+      // Remove OTP from Redis
+      await redisClient.del(`otp:${email}`);
+
+
+      res.status(200).json({
+         message: 'User registered and logged in successfully',
+         user: {
+            id: newUser._id,
+            username: newUser.username,
+            name: newUser.name,
+            email: newUser.email,
+            isVerified: newUser.isVerified,
+            role: newUser.role,
+         },
+         token
+      });
+   } catch (error) {
+      console.error('Registration error:', error);
+      return res.status(500).json({ message: error.message });
+   }
+};
 
 // Login user
 export const login = async (req, res) => {
@@ -193,8 +261,8 @@ export const login = async (req, res) => {
             username: user.username,
             name: user.name,
             email: user.email,
-            phone: user.phone,
-            role: user.role,
+            isVerified: user.isVerified,
+            role: user.role
          },
          token
       });
@@ -214,16 +282,14 @@ export const logout = async (req, res) => {
    }
 }
 
-// Forgot password
-// export const forgotPassword = async (req, res){
-//    const { email } = req.body;
+// Sorry abhi krne ka mode nhi hai 
+export const forgotPassword = async (req, res) => {
+   const { email } = req.body;
 
-//    // check email exits or not inside my db
-//    const user = await userModel.findOne({ email })
+   // check email exits or not inside my db
+   const user = await userModel.findOne({ email })
 
-//    if(!user){
-//       return res.status(404).json({ message: 'User not found' });
-//    }
-
-
-// }
+   if (!user) {
+      return res.status(404).json({ message: 'User not found' });
+   }
+}
