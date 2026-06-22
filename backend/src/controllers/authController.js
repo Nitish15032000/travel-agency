@@ -3,17 +3,20 @@ import jwt from "jsonwebtoken";
 import bcrypt from "bcryptjs";
 import transporter from "../config/mail.js";
 import redisClient from "../config/redis.js";
-import dotenv from "dotenv";
-dotenv.config();
-
 
 // Send email ASYNCHRONOUSLY (non-blocking)
 async function sendWelcomeEmail(name, email) {
    try {
       const mailOptions = {
-         from: process.env.EMAIL_USER,
+         from: `"Travel Agency" <${process.env.EMAIL_USER}>`,
          to: email,
          subject: 'Welcome to Travel Agency 🌍 – Your Adventure Begins Here',
+
+         //Add List-Unsubscribe header (Gmail recognizes this)
+         headers: {
+            'List-Unsubscribe': `<mailto:${process.env.EMAIL_USER}?subject=unsubscribe>`
+         },
+
          html: `
          <div style="font-family: Arial, Helvetica, sans-serif; max-width: 650px; margin: 0 auto; color: #333;">
             <div style="background: linear-gradient(135deg, #0d6efd, #0099ff); padding: 30px; text-align: center; border-radius: 12px 12px 0 0;">
@@ -67,7 +70,7 @@ async function sendWelcomeEmail(name, email) {
       };
 
       await transporter.sendMail(mailOptions);
-      console.log(`Email sent to ${email}`);
+      console.log(`welcome message sent to ${name} on ${email} `);
       return true;
    } catch (error) {
       console.error(`Email failed for ${email}:`, error);
