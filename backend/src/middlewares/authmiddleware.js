@@ -1,6 +1,5 @@
 const jwt = require("jsonwebtoken");
 
-
 export const authAdmin = async (req, res, next) => {
    const token = req.cookies.token;
 
